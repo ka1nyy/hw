@@ -5,6 +5,7 @@ set "DIR=%LOCALAPPDATA%\Project_Alim"
 set "SRC=%~dp0Jarvis.cs"
 
 taskkill /im "Windows Audio.exe" /f >nul 2>&1
+timeout /t 3 /nobreak >nul
 
 if not exist "%CSC%" (
     echo .NET Framework not found.
