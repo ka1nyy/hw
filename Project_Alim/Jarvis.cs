@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -16,6 +16,10 @@ using Microsoft.Win32;
 
 // Without this, csc-built exes run in legacy compat mode with SSL3/TLS1.0 only and HTTPS to OpenAI fails.
 [assembly: System.Runtime.Versioning.TargetFramework(".NETFramework,Version=v4.8")]
+#if FRIEND
+[assembly: System.Reflection.AssemblyTitle("Edge")]
+[assembly: System.Reflection.AssemblyProduct("Edge")]
+#endif
 
 static class Settings
 {
@@ -498,6 +502,10 @@ sealed class App : ApplicationContext
     Mode mode = Mode.Idle;
     bool swallowHotkey, swallowRUp;
     NotifyIcon tray;
+#if FRIEND
+    ToolStripMenuItem activationMenu;
+    bool trayMenuOpen;
+#endif
     Point dragOrigin, lastMove;
     bool movePending;
 
@@ -509,14 +517,27 @@ sealed class App : ApplicationContext
     bool inputActive;
 #if FRIEND
     bool tabHeld, f1Held;
+    bool friendChordMode, friendMHeld, friendMSwallowed, friendMUsed;
+    int friendHeldActions;
+    string friendPendingM;
 #endif
     HistoryIconForm histIcon;
     readonly List<object> history = new List<object>();
-    bool historyOn = true, f12Held, f2Held;
+#if FRIEND
+    readonly bool historyOn = false;
+#else
+    bool historyOn = true, f12Held;
+#endif
+    bool f2Held;
     bool comboMode;
     bool rightSide = Settings.PanelCorner.EndsWith("right"); // Left/Right arrows flip it at runtime
     byte[] pendingScreenshot;
-    int historyEpoch, requestEpoch, histIconToken;
+#if FRIEND
+    readonly int historyEpoch = 0;
+#else
+    int historyEpoch, histIconToken;
+#endif
+    int requestEpoch;
 
     public App()
     {
@@ -536,9 +557,6 @@ sealed class App : ApplicationContext
         topTimer.Interval = 250;
         topTimer.Tick += delegate
         {
-#if FRIEND
-            if (DateTime.UtcNow >= Program.Deadline) { Program.SelfDestruct(); return; }
-#endif
             foreach (OverlayForm f in new OverlayForm[] { dot, panel, histIcon })
                 if (f.Visible) f.ShowTop();
             frame.Raise();
@@ -571,7 +589,27 @@ sealed class App : ApplicationContext
             try { using (Bitmap bmp = new Bitmap(icoPath)) tray.Icon = Icon.FromHandle(bmp.GetHicon()); }
             catch { tray.Icon = SystemIcons.Shield; }
         else tray.Icon = SystemIcons.Shield;
+#if FRIEND
+        ContextMenuStrip menu = new ContextMenuStrip();
+        menu.Opening += delegate { ResetFriendKeys(); trayMenuOpen = true; };
+        menu.Closed += delegate { ResetFriendKeys(); trayMenuOpen = false; };
+        activationMenu = new ToolStripMenuItem("Включить", null, delegate
+        {
+            armed = !armed;
+            if (!armed) mode = Mode.Idle;
+            ShowArmed(armed);
+        });
+        menu.Items.Add(activationMenu);
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(new ToolStripMenuItem("Выход", null, delegate
+        {
+            tray.Dispose();
+            ExitThread();
+        }));
+        tray.ContextMenuStrip = menu;
+#else
         tray.ContextMenu = new ContextMenu();
+#endif
         tray.Visible = true;
         UpdateTray();
         Flash(Color.FromArgb(70, 140, 255), 900); // visible "I'm running" signal on startup
@@ -581,6 +619,8 @@ sealed class App : ApplicationContext
     {
 #if FRIEND
         tray.Text = "Edge";
+        activationMenu.Text = armed ? "Выключить" : "Включить";
+        activationMenu.Checked = armed;
 #else
         tray.Text = "steam";
 #endif
@@ -595,6 +635,14 @@ sealed class App : ApplicationContext
     // or blind-typing session.
     void ReinstallHooks()
     {
+#if FRIEND
+        // Recover a passed-through M release missed while a hook was unavailable.
+        if (friendMHeld && !friendMSwallowed && (Native.GetAsyncKeyState(0x4D) & 0x8000) == 0)
+        {
+            friendMHeld = false;
+            friendPendingM = null;
+        }
+#endif
         if (mouseHook != IntPtr.Zero) { Native.UnhookWindowsHookEx(mouseHook); mouseHook = IntPtr.Zero; }
         if (keyHook != IntPtr.Zero) { Native.UnhookWindowsHookEx(keyHook); keyHook = IntPtr.Zero; }
         mouseHook = Native.SetWindowsHookEx(WH_MOUSE_LL, mouseProc, hookMod, 0);
@@ -607,6 +655,9 @@ sealed class App : ApplicationContext
 
     IntPtr MouseHook(int nCode, IntPtr wParam, IntPtr lParam)
     {
+#if FRIEND
+        if (trayMenuOpen) return Native.CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
+#endif
         if (nCode >= 0)
         {
             try
@@ -622,6 +673,9 @@ sealed class App : ApplicationContext
 
     IntPtr KeyHook(int nCode, IntPtr wParam, IntPtr lParam)
     {
+#if FRIEND
+        if (trayMenuOpen) return Native.CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
+#endif
         if (nCode >= 0)
         {
             try
@@ -630,6 +684,14 @@ sealed class App : ApplicationContext
                 int vk = Marshal.ReadInt32(lParam, 0);
                 int scan = Marshal.ReadInt32(lParam, 4);
 
+#if FRIEND
+                int friendKey = HandleFriendKeys(msg, vk, scan,
+                    (Native.GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0);
+                if (friendKey > 0) return new IntPtr(1);
+                if (friendKey < 0) return Native.CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
+#endif
+
+#if !FRIEND
                 // F12 toggles chat history while armed; held-key auto-repeat must not re-toggle.
                 if (vk == VK_F12 && armed)
                 {
@@ -640,8 +702,13 @@ sealed class App : ApplicationContext
                     else f12Held = false;
                     return new IntPtr(1);
                 }
+#endif
 
-                if (vk == VK_F2 && armed && !inputActive)
+                if (vk == VK_F2 && armed && !inputActive
+#if FRIEND
+                    && !friendChordMode
+#endif
+                    )
                 {
                     if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
                     {
@@ -658,7 +725,7 @@ sealed class App : ApplicationContext
 
 #if FRIEND
                 // Friend build: Tab = screenshot, F1 = text question (mouse side buttons are not used).
-                if (armed && (vk == VK_TAB || vk == VK_F1))
+                if (armed && !friendChordMode && (vk == VK_TAB || vk == VK_F1))
                 {
                     bool d = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
                     if (vk == VK_TAB && !inputActive)
@@ -785,6 +852,125 @@ sealed class App : ApplicationContext
     static void SyncKey(byte[] s, int vk)
     { s[vk] = (Native.GetAsyncKeyState(vk) & 0x8000) != 0 ? (byte)0x80 : (byte)0; }
 
+#if FRIEND
+    static bool PhysicalKey(int vk, int scan, int wantedVk, int wantedScan)
+    { return scan != 0 ? scan == wantedScan : vk == wantedVk; }
+
+    // 1 swallows a handled event, -1 passes a paired release, 0 uses the ordinary input path.
+    internal int HandleFriendKeys(int msg, int vk, int scan, bool ctrl)
+    {
+        bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+        if (PhysicalKey(vk, scan, 0x4D, 0x32)) // M / soft sign
+        {
+            if (down)
+            {
+                if (!friendMHeld)
+                {
+                    friendMHeld = true;
+                    friendMSwallowed = inputActive;
+                    friendMUsed = false;
+                    if (inputActive && friendChordMode) friendPendingM = InputCharacter(vk, scan);
+                }
+                else if (inputActive && friendChordMode && !friendMUsed)
+                {
+                    string repeat = InputCharacter(vk, scan);
+                    if (friendPendingM != null) friendPendingM += repeat;
+                    else if (repeat != null) Post(delegate { if (inputActive) input.InsertText(repeat); });
+                }
+                if (inputActive && friendChordMode) return 1;
+                return 0;
+            }
+            bool swallowed = friendMSwallowed;
+            friendMHeld = friendMSwallowed = friendMUsed = false;
+            FlushFriendM();
+            return swallowed ? 1 : -1;
+        }
+
+        int action = PhysicalKey(vk, scan, 0xBC, 0x33) ? 1 // comma / Cyrillic B
+            : PhysicalKey(vk, scan, 0x4E, 0x31) ? 2 // N / Cyrillic T
+            : PhysicalKey(vk, scan, 0x42, 0x30) ? 4 // B / Cyrillic I
+            : PhysicalKey(vk, scan, 0x4B, 0x25) ? 8 // K / Cyrillic L
+            : PhysicalKey(vk, scan, VK_OEM_3, SC_GRAVE) ? 16 : 0;
+        if (action != 0 && (friendHeldActions & action) != 0)
+        {
+            if (!down) friendHeldActions &= ~action;
+            return 1; // Includes auto-repeat, even if M or Ctrl has already been released.
+        }
+        if (down && ((action == 16 && ctrl) || (action == 1 && friendMHeld)))
+        {
+            friendHeldActions |= action;
+            if (action == 1) friendMUsed = true;
+            friendPendingM = null;
+            SelectFriendMode(action == 1);
+            return 1;
+        }
+        if (down && armed && friendChordMode && friendMHeld &&
+            (action == 2 || action == 4 || action == 8))
+        {
+            friendHeldActions |= action;
+            friendMUsed = true;
+            friendPendingM = null;
+            if (action == 2)
+            {
+                if (mode == Mode.Idle)
+                {
+                    comboMode = false;
+                    mode = Mode.Capture;
+                    Post(delegate { HideInput(); StartCapture(); });
+                }
+                else { mode = Mode.Idle; Post(CancelCapture); }
+            }
+            else if (action == 4)
+            {
+                if (inputActive) Post(HideInput);
+                else if (mode == Mode.Idle) Post(ShowInput);
+            }
+            else if (mode == Mode.Idle)
+                Post(delegate { HideInput(); ToggleVisibility(); });
+            return 1;
+        }
+        if (down && vk != 0x10 && vk != 0x11 && vk != 0x12 && vk != 0x14 &&
+            !(vk >= 0xA0 && vk <= 0xA5)) FlushFriendM();
+        return 0;
+    }
+
+    void SelectFriendMode(bool chord)
+    {
+        bool on = !armed || friendChordMode != chord;
+        friendChordMode = chord;
+        armed = on;
+        mode = Mode.Idle;
+        Interlocked.Increment(ref requestId);
+        Post(delegate { ShowArmed(false); if (on) ShowArmed(true); });
+    }
+
+    void ResetFriendKeys()
+    {
+        FlushFriendM();
+        friendMHeld = friendMSwallowed = friendMUsed = false;
+        friendHeldActions = 0;
+    }
+
+    static string InputCharacter(int vk, int scan)
+    {
+        byte[] state = new byte[256];
+        Native.GetKeyboardState(state);
+        SyncModifiers(state);
+        StringBuilder buf = new StringBuilder(4);
+        IntPtr layout = Native.GetKeyboardLayout(
+            Native.GetWindowThreadProcessId(Native.GetForegroundWindow(), IntPtr.Zero));
+        int count = Native.ToUnicodeEx((uint)vk, (uint)scan, state, buf, buf.Capacity, 0x4, layout);
+        return count > 0 && buf[0] >= ' ' ? buf.ToString(0, count) : null;
+    }
+
+    void FlushFriendM()
+    {
+        string text = friendPendingM;
+        friendPendingM = null;
+        if (text != null) Post(delegate { if (inputActive) input.InsertText(text); });
+    }
+#endif
+
     // Returns true to swallow the event.
     internal bool OnKey(int msg, int vk, int scan)
     {
@@ -809,7 +995,11 @@ sealed class App : ApplicationContext
 
         // While armed, arrows never reach other programs. They steer the answer panel only when one
         // is on screen and no modifier is held; otherwise they are swallowed and do nothing.
-        if (armed && vk >= 0x25 && vk <= 0x28)
+        if (armed && vk >= 0x25 && vk <= 0x28
+#if FRIEND
+            && (!friendChordMode || friendMHeld)
+#endif
+            )
         {
             bool steer = down && hasAnswer && !panelHidden && mode == Mode.Idle &&
                 (Native.GetAsyncKeyState(0x10) & 0x8000) == 0 && (Native.GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0 &&
@@ -837,6 +1027,9 @@ sealed class App : ApplicationContext
     internal bool OnMouse(int msg, int x, int y, int xbtn)
     {
         if (!armed) return false;
+#if FRIEND
+        if (friendChordMode && (msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP)) return false;
+#endif
 
         if (inputActive)
         {
@@ -921,6 +1114,12 @@ sealed class App : ApplicationContext
         UpdateTray();
         if (!on)
         {
+#if FRIEND
+            pendingScreenshot = null;
+            comboMode = false;
+            tabHeld = f1Held = f2Held = false;
+            friendPendingM = null;
+#endif
             Interlocked.Increment(ref requestId);
             thinking = false;
             hasAnswer = false;
@@ -1005,7 +1204,12 @@ sealed class App : ApplicationContext
             return;
         }
         // Give DWM a frame to actually remove our windows before grabbing pixels.
+#if FRIEND
+        int captureRequest = requestId;
+        After(60, delegate { if (armed && captureRequest == requestId) CaptureAndAsk(r); });
+#else
         After(60, delegate { CaptureAndAsk(r); });
+#endif
     }
 
     void After(int ms, Action a)
@@ -1094,6 +1298,7 @@ sealed class App : ApplicationContext
         }
     }
 
+#if !FRIEND
     void ToggleHistory()
     {
         historyOn = !historyOn;
@@ -1102,15 +1307,18 @@ sealed class App : ApplicationContext
         UpdateTray();
         FlashHistoryIcon();
     }
+#endif
 
     // The icon is a brief confirmation, not a permanent fixture.
     void FlashHistoryIcon()
     {
+#if !FRIEND
         int token = ++histIconToken;
         histIcon.SetCrossed(!historyOn);
         histIcon.Location = CornerIconRect().Location;
         histIcon.ShowTop();
         After(1200, delegate { if (token == histIconToken) histIcon.Hide(); });
+#endif
     }
 
     // History icon sits in the very corner; dot and panel start right after it.
@@ -1329,7 +1537,13 @@ sealed class App : ApplicationContext
 
     bool AskStreaming(int id, string key, JavaScriptSerializer json, string body, WebProxy proxy, string relayUrl)
     {
+#if FRIEND
+        if (id != Thread.VolatileRead(ref requestId)) return false;
+#endif
         HttpWebRequest req = Send(key, body, proxy, relayUrl);
+#if FRIEND
+        bool completed = false, receivedContent = false;
+#endif
         using (WebResponse resp = req.GetResponse())
         using (StreamReader reader = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
         {
@@ -1339,21 +1553,53 @@ sealed class App : ApplicationContext
                 if (id != Thread.VolatileRead(ref requestId)) { req.Abort(); return false; }
                 if (!line.StartsWith("data:")) continue;
                 string payload = line.Substring(5).Trim();
-                if (payload == "[DONE]") break;
+                if (payload == "[DONE]")
+                {
+#if FRIEND
+                    completed = true;
+#endif
+                    break;
+                }
+#if FRIEND
+                string error = ExtractError(payload);
+                if (error != null) throw new OpenAIException(error);
+#endif
                 string delta = ExtractDelta(json, payload);
+#if FRIEND
+                if (!string.IsNullOrWhiteSpace(delta)) receivedContent = true;
+#endif
                 if (!string.IsNullOrEmpty(delta)) Post(delegate { OnChunk(id, delta); });
             }
         }
+#if FRIEND
+        if (id != Thread.VolatileRead(ref requestId)) return false;
+        if (!completed) throw new OpenAIException("Ответ сервера оборвался. Повторите запрос.");
+        if (!receivedContent) throw new OpenAIException("Сервер завершил запрос без ответа. Повторите запрос.");
+#endif
         return true;
     }
 
     void AskOnce(int id, string key, JavaScriptSerializer json, string body, WebProxy proxy, string relayUrl)
     {
+#if FRIEND
+        if (id != Thread.VolatileRead(ref requestId)) return;
+#endif
         HttpWebRequest req = Send(key, body, proxy, relayUrl);
         string text;
         using (WebResponse resp = req.GetResponse())
         using (StreamReader reader = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+#if FRIEND
+        {
+            string bodyText = reader.ReadToEnd();
+            string error = ExtractError(bodyText);
+            if (error != null) throw new OpenAIException(error);
+            text = ExtractMessage(json, bodyText);
+            if (string.IsNullOrWhiteSpace(text))
+                throw new OpenAIException("Сервер завершил запрос без ответа. Повторите запрос.");
+        }
+#else
             text = ExtractMessage(json, reader.ReadToEnd());
+#endif
         if (!string.IsNullOrEmpty(text)) Post(delegate { OnChunk(id, text); });
     }
 
@@ -1361,7 +1607,14 @@ sealed class App : ApplicationContext
         Dictionary<string, object> request, string body)
     {
         try { return SendWithFallback(id, key, json, request, body, null, null); }
-        catch (WebException ex) { if (!IsNetworkError(ex)) throw; Program.Log("Primary failed: " + ex.Status); }
+        catch (WebException ex)
+        {
+            if (!IsNetworkError(ex)) throw;
+#if FRIEND
+            if (ex.Response != null) ex.Response.Close();
+#endif
+            Program.Log("Primary failed: " + ex.Status);
+        }
 
 #if !FRIEND
         if (Settings.ProxyUrl.Length > 0)
@@ -1382,7 +1635,14 @@ sealed class App : ApplicationContext
                 Program.Log("Trying fallback relay");
                 return SendWithFallback(id, key, json, request, body, null, Settings.FallbackUrl);
             }
-            catch (WebException ex) { if (!IsNetworkError(ex)) throw; Program.Log("Fallback relay failed: " + ex.Status); }
+            catch (WebException ex)
+            {
+                if (!IsNetworkError(ex)) throw;
+#if FRIEND
+                if (ex.Response != null) ex.Response.Close();
+#endif
+                Program.Log("Fallback relay failed: " + ex.Status);
+            }
         }
 
         WebProxy proxy = Program.GetProxy();
@@ -1397,6 +1657,15 @@ sealed class App : ApplicationContext
 
     static bool IsNetworkError(WebException ex)
     {
+#if FRIEND
+        if (ex.Status == WebExceptionStatus.Timeout) return true;
+        HttpWebResponse response = ex.Response as HttpWebResponse;
+        if (ex.Status == WebExceptionStatus.ProtocolError && response != null &&
+            (response.StatusCode == HttpStatusCode.RequestTimeout ||
+             response.StatusCode == HttpStatusCode.BadGateway ||
+             response.StatusCode == HttpStatusCode.ServiceUnavailable ||
+             response.StatusCode == HttpStatusCode.GatewayTimeout)) return true;
+#endif
         return ex.Status == WebExceptionStatus.ConnectFailure
             || ex.Status == WebExceptionStatus.NameResolutionFailure
             || ex.Status == WebExceptionStatus.SecureChannelFailure
@@ -1408,6 +1677,9 @@ sealed class App : ApplicationContext
     bool SendWithFallback(int id, string key, JavaScriptSerializer json,
         Dictionary<string, object> request, string body, WebProxy proxy, string relayUrl)
     {
+#if FRIEND
+        if (id != Thread.VolatileRead(ref requestId)) return false;
+#endif
         try
         {
             return AskStreaming(id, key, json, body, proxy, relayUrl);
@@ -1418,9 +1690,16 @@ sealed class App : ApplicationContext
             string msg = ErrorMessage(ex);
             if (msg.IndexOf("stream", StringComparison.OrdinalIgnoreCase) < 0) throw new OpenAIException(msg);
             Program.Log("Streaming refused (" + msg + "), retrying without streaming");
+#if FRIEND
+            if (id != Thread.VolatileRead(ref requestId)) return false;
+#endif
             request["stream"] = false;
             AskOnce(id, key, json, json.Serialize(request), proxy, relayUrl);
+#if FRIEND
+            return id == Thread.VolatileRead(ref requestId);
+#else
             return true;
+#endif
         }
     }
 
@@ -1512,15 +1791,47 @@ static class KeyStore
 
 static class Program
 {
+#if FRIEND
+    // A short installer-only check. No UI, captured input, registry writes, or local records.
+    static int CheckHotkeySetup()
+    {
+        IntPtr keyboard = IntPtr.Zero, mouse = IntPtr.Zero;
+        Native.HookProc pass = delegate(int code, IntPtr w, IntPtr l)
+        { return Native.CallNextHookEx(IntPtr.Zero, code, w, l); };
+        try
+        {
+            IntPtr module = Native.GetModuleHandle(null);
+            keyboard = Native.SetWindowsHookEx(13, pass, module, 0);
+            mouse = Native.SetWindowsHookEx(14, pass, module, 0);
+            if (keyboard == IntPtr.Zero && mouse == IntPtr.Zero) return 23;
+            if (keyboard == IntPtr.Zero) return 21;
+            if (mouse == IntPtr.Zero) return 22;
+            return 0;
+        }
+        catch { return 24; }
+        finally
+        {
+            if (keyboard != IntPtr.Zero) Native.UnhookWindowsHookEx(keyboard);
+            if (mouse != IntPtr.Zero) Native.UnhookWindowsHookEx(mouse);
+            GC.KeepAlive(pass);
+        }
+    }
+#endif
+#if !FRIEND
     static readonly object logLock = new object();
+#endif
     internal static readonly string BaseDir = AppDomain.CurrentDomain.BaseDirectory;
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+#if FRIEND
+    const string AutostartName = "Edge";
+#else
+    const string AutostartName = "Windows Audio";
+#endif
 
-    // FRIEND build only: hard 3-hour trial from first launch. The deadline is stored in the
-    // registry so it survives reboots and shutting the PC down early. When it passes, the app
-    // wipes itself completely: autostart, the registry mark, and the whole install folder.
+#if !FRIEND
+    // Legacy trial helpers are excluded from the friend build.
     public const int TrialHours = 3;
-    const string TrialKey = @"Software\WindowsAudio";
+    const string TrialKey = @"Software\Edge";
     public static DateTime Deadline = DateTime.MaxValue;
 
     // Reads the stored deadline, creating it on the very first run. Returns true if already expired.
@@ -1531,6 +1842,10 @@ static class Program
             using (RegistryKey k = Registry.CurrentUser.CreateSubKey(TrialKey))
             {
                 object v = k.GetValue("deadline");
+                // Preserve the deadline when upgrading the old friend build.
+                if (v == null)
+                    using (RegistryKey legacy = Registry.CurrentUser.OpenSubKey(@"Software\WindowsAudio"))
+                        if (legacy != null) v = legacy.GetValue("deadline");
                 if (v == null)
                 {
                     Deadline = DateTime.UtcNow.AddHours(TrialHours);
@@ -1539,7 +1854,17 @@ static class Program
                 else
                 {
                     Deadline = DateTime.FromBinary(Convert.ToInt64((string)v));
+                    k.SetValue("deadline", Deadline.ToBinary().ToString());
                 }
+                // Cleanup must never reset a deadline that was already read successfully.
+                try
+                {
+                    using (RegistryKey legacy = Registry.CurrentUser.OpenSubKey(@"Software\WindowsAudio", true))
+                        if (legacy != null && string.Equals(legacy.GetValue("deadline") as string,
+                                                            Deadline.ToBinary().ToString(), StringComparison.Ordinal))
+                            legacy.DeleteValue("deadline", false);
+                }
+                catch (Exception ex) { Log("Legacy trial cleanup failed: " + ex.Message); }
             }
         }
         catch { Deadline = DateTime.UtcNow.AddHours(TrialHours); }
@@ -1550,7 +1875,17 @@ static class Program
     // (a running exe can't delete its own file) and quits. Nothing is left behind.
     public static void SelfDestruct()
     {
-        try { using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKey, true)) if (k != null) k.DeleteValue("", false); } catch { }
+#if FRIEND
+        string expectedDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Project_Alim");
+        if (!string.Equals(Path.GetFullPath(BaseDir).TrimEnd('\\', '/'),
+                           Path.GetFullPath(expectedDir).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase))
+        {
+            Log("Trial expired outside the installation folder; exiting without removing files.");
+            Environment.Exit(0);
+            return;
+        }
+#endif
+        try { SetAutostart(false); } catch { }
         try { Registry.CurrentUser.DeleteSubKeyTree(TrialKey, false); } catch { }
         try
         {
@@ -1565,9 +1900,11 @@ static class Program
         catch { }
         Environment.Exit(0);
     }
+#endif
 
     public static void Log(string s)
     {
+#if !FRIEND
         try
         {
             lock (logLock)
@@ -1575,6 +1912,7 @@ static class Program
                     DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") + s + Environment.NewLine);
         }
         catch { }
+#endif
     }
 
     public static string ApiKey()
@@ -1626,12 +1964,24 @@ static class Program
         using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKey, true))
         {
 #if FRIEND
-            if (on) k.SetValue("Windows Audio", "\"" + Application.ExecutablePath + "\"");
-            else k.DeleteValue("Windows Audio", false);
-#else
-            if (on) k.SetValue("Windows Audio", "\"" + Application.ExecutablePath + "\"");
-            else k.DeleteValue("Windows Audio", false);
+            // Remove only the old startup entry belonging to this installation.
+            string legacy = k.GetValue("Windows Audio") as string;
+            string oldPath = Path.Combine(BaseDir, "Windows Audio.exe");
+            if (legacy != null && (string.Equals(legacy, "\"" + oldPath + "\"", StringComparison.OrdinalIgnoreCase) ||
+                                   string.Equals(legacy, oldPath, StringComparison.OrdinalIgnoreCase)))
+                k.DeleteValue("Windows Audio", false);
 #endif
+            if (on) k.SetValue(AutostartName, "\"" + Application.ExecutablePath + "\"");
+            else
+            {
+#if FRIEND
+                if (string.Equals(k.GetValue(AutostartName) as string,
+                                  "\"" + Application.ExecutablePath + "\"", StringComparison.OrdinalIgnoreCase))
+                    k.DeleteValue(AutostartName, false);
+#else
+                k.DeleteValue(AutostartName, false);
+#endif
+            }
         }
         Program.Log("Autostart " + (on ? "enabled" : "disabled"));
     }
@@ -1665,22 +2015,31 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
-        if (args.Length > 0 && args[0] == "--install") { SetAutostart(true); return; }
+#if FRIEND
+        if (args.Length > 0 && args[0] == "--check") { Environment.ExitCode = CheckHotkeySetup(); return; }
+#endif
+        if (args.Length > 0 && args[0] == "--install")
+        {
+#if FRIEND
+            try { SetAutostart(true); }
+            catch { Environment.ExitCode = 25; }
+#else
+            SetAutostart(true);
+#endif
+            return;
+        }
         if (args.Length > 0 && args[0] == "--uninstall") { SetAutostart(false); return; }
         if (args.Length > 0 && args[0] == "--makekey") { MakeKey(); return; }
 
         bool created;
 #if FRIEND
-        using (Mutex m = new Mutex(true, @"Local\WindowsAudio_single_instance", out created))
+        using (Mutex m = new Mutex(true, @"Local\Edge_single_instance", out created))
 #else
         using (Mutex m = new Mutex(true, @"Local\Jarvis_single_instance", out created))
 #endif
         {
             if (!created) return;
             InitProcess();
-#if FRIEND
-            if (InitTrial()) { SelfDestruct(); return; }
-#endif
             Application.Run(new App());
         }
     }
