@@ -543,7 +543,11 @@ sealed class App : ApplicationContext
     {
         using (Graphics g = Graphics.FromHwnd(IntPtr.Zero)) scale = g.DpiX / 96f;
 
+#if FRIEND
+        dot = new DotForm(Math.Max(4, S(4)));
+#else
         dot = new DotForm(S(12));
+#endif
         frame = new SelectionFrame(1);
         panel = new PanelForm(S(7));
         input = new InputForm(S(Settings.PanelWidth), S(28));
@@ -1828,7 +1832,101 @@ static class Program
     const string AutostartName = "Windows Audio";
 #endif
 
-#if !FRIEND
+#if FRIEND
+    public const int TrialHours = 3;
+    const string TrialFile = ".edge-expiry";
+    public static DateTime Deadline;
+    static System.Threading.Timer trialTimer;
+    static Stopwatch trialClock;
+    static int removalStarted;
+
+    public static bool InitTrial()
+    {
+        string path = Path.Combine(BaseDir, TrialFile);
+        if (File.Exists(path))
+        {
+            long ticks;
+            if (!long.TryParse(File.ReadAllText(path).Trim(), out ticks) ||
+                ticks < DateTime.MinValue.Ticks || ticks > DateTime.MaxValue.Ticks)
+                throw new InvalidDataException("The application expiry record is invalid.");
+            Deadline = new DateTime(ticks, DateTimeKind.Utc);
+        }
+        else
+        {
+            Deadline = DateTime.UtcNow.AddHours(TrialHours);
+            // Store only the expiry time; never save questions, answers, or images here.
+            using (FileStream file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (StreamWriter writer = new StreamWriter(file))
+                writer.Write(Deadline.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+        return DateTime.UtcNow >= Deadline;
+    }
+
+    static void StartTrialTimer()
+    {
+        double remaining = Math.Max(0, (Deadline - DateTime.UtcNow).TotalMilliseconds);
+        int due = (int)Math.Min(TimeSpan.FromHours(TrialHours).TotalMilliseconds, Math.Ceiling(remaining));
+        trialClock = Stopwatch.StartNew();
+        // Check UTC after sleep/resume, with a monotonic limit if the clock moves backwards.
+        trialTimer = new System.Threading.Timer(delegate
+        {
+            if (DateTime.UtcNow >= Deadline || trialClock.ElapsedMilliseconds >= due) SelfDestruct();
+        }, null, Math.Min(due, 1000), 1000);
+    }
+
+    static ProcessStartInfo SelfRemovalCommand()
+    {
+        string expected = Path.GetFullPath(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Project_Alim"));
+        string actual = Path.GetFullPath(BaseDir).TrimEnd('\\', '/');
+        if (!string.Equals(actual, expected.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(Path.GetFullPath(Application.ExecutablePath),
+                           Path.Combine(expected, "Edge.exe"), StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        // Never follow a junction or symlink while uninstalling this copy.
+        for (DirectoryInfo directory = new DirectoryInfo(expected); directory != null; directory = directory.Parent)
+            if ((directory.Attributes & FileAttributes.ReparsePoint) != 0) return null;
+
+        // Delete only this application's files. A nonempty folder is intentionally preserved.
+        // The directory travels as an environment value, not executable command text.
+        string command = "/d /q /v:off /c for /l %i in (1,1,15) do @if exist \"%JARVIS_REMOVE_DIR%\\.edge-removing\" " +
+            "if exist \"%JARVIS_REMOVE_DIR%\\Edge.exe\" " +
+            "(del /q \"%JARVIS_REMOVE_DIR%\\Edge.exe\" >nul 2>&1 & " +
+            "if exist \"%JARVIS_REMOVE_DIR%\\Edge.exe\" ping -n 2 127.0.0.1 >nul 2>&1) & " +
+            "if exist \"%JARVIS_REMOVE_DIR%\\.edge-removing\" if not exist \"%JARVIS_REMOVE_DIR%\\Edge.exe\" " +
+            "(del /q \"%JARVIS_REMOVE_DIR%\\icon.png\" \"%JARVIS_REMOVE_DIR%\\.edge-expiry\" " +
+            "\"%JARVIS_REMOVE_DIR%\\.edge-removing\" >nul 2>&1 & " +
+            "rd \"%JARVIS_REMOVE_DIR%\" >nul 2>&1)";
+        ProcessStartInfo start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"), command);
+        start.UseShellExecute = false;
+        start.CreateNoWindow = true;
+        start.WindowStyle = ProcessWindowStyle.Hidden;
+        start.WorkingDirectory = Environment.SystemDirectory;
+        start.EnvironmentVariables["JARVIS_REMOVE_DIR"] = expected;
+        return start;
+    }
+
+    public static void SelfDestruct()
+    {
+        if (Interlocked.Exchange(ref removalStarted, 1) != 0) return;
+        try
+        {
+            ProcessStartInfo command = SelfRemovalCommand();
+            if (command != null)
+            {
+                // An interrupted removal must not race a new installation.
+                using (FileStream marker = new FileStream(Path.Combine(BaseDir, ".edge-removing"),
+                       FileMode.CreateNew, FileAccess.Write, FileShare.None)) { }
+                try { SetAutostart(false); } catch { }
+                Process.Start(command);
+            }
+        }
+        catch { }
+        // Expiry always stops this copy, even when its files cannot be removed.
+        Environment.Exit(0);
+    }
+#else
     // Legacy trial helpers are excluded from the friend build.
     public const int TrialHours = 3;
     const string TrialKey = @"Software\Edge";
@@ -2040,6 +2138,14 @@ static class Program
         {
             if (!created) return;
             InitProcess();
+#if FRIEND
+            try
+            {
+                if (InitTrial()) { SelfDestruct(); return; }
+                StartTrialTimer();
+            }
+            catch { Environment.ExitCode = 26; return; }
+#endif
             Application.Run(new App());
         }
     }

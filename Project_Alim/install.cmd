@@ -23,6 +23,13 @@ if not exist "%DIR%" (
     exit /b 1
 )
 
+if exist "%DIR%\.edge-removing" (
+    echo Automatic removal is in progress. Wait a few seconds before installing again.
+    echo If this message persists, run uninstall.cmd before a fresh installation.
+    pause
+    exit /b 1
+)
+
 echo Closing previous copies from the Project_Alim installation folder...
 powershell.exe -NoProfile -Command "$ErrorActionPreference='Stop'; try { $old=Join-Path $env:DIR 'Windows Audio.exe'; Get-Process -Name 'Edge','Windows Audio' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $env:APP -or $_.Path -eq $old } | ForEach-Object { Stop-Process -InputObject $_ -ErrorAction Stop; if (-not $_.WaitForExit(10000)) { throw 'Previous process did not stop.' } }; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
 set "PROCESS_CHECK_RESULT=%ERRORLEVEL%"
@@ -33,10 +40,24 @@ if not "%PROCESS_CHECK_RESULT%"=="0" (
     exit /b 1
 )
 
+if exist "%DIR%\.edge-removing" (
+    echo Automatic removal started while closing the previous copy. Installation stopped.
+    echo Wait for removal to finish, then install again.
+    pause
+    exit /b 1
+)
+
 echo Building...
 "%CSC%" /nologo /target:winexe /optimize+ /define:FRIEND /out:"%APP%" /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll /r:System.Security.dll "%SRC%"
 if errorlevel 1 (
     echo Build failed.
+    pause
+    exit /b 1
+)
+
+if exist "%DIR%\.edge-removing" (
+    echo Automatic removal started during installation. Installation stopped.
+    echo Wait for removal to finish, then install again.
     pause
     exit /b 1
 )
@@ -77,6 +98,8 @@ if errorlevel 1 (
 
 echo Edge is installed and its process is running.
 echo This does not verify keyboard shortcuts or network access.
+echo This copy expires and attempts to remove its own files three hours after its first launch.
+echo Closing or restarting the app does not reset that deadline.
 echo Ctrl + the key below Esc toggles activation. The green dot flashes briefly.
 echo Ctrl + that key selects the classic Tab / F1 / F2 / middle-click controls.
 echo Hold M and press comma for the second mode: M+N screenshot, M+B text, M+K answer.
