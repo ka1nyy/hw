@@ -546,7 +546,7 @@ sealed class App : ApplicationContext
 #if FRIEND
         dot = new DotForm(Math.Max(4, S(4)));
 #else
-        dot = new DotForm(S(12));
+        dot = new DotForm(S(4));
 #endif
         frame = new SelectionFrame(1);
         panel = new PanelForm(S(7));
