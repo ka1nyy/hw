@@ -14,7 +14,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-// Without this, csc-built exes run in legacy compat mode with SSL3/TLS1.0 only and HTTPS to OpenAI fails.
+
 [assembly: System.Runtime.Versioning.TargetFramework(".NETFramework,Version=v4.8")]
 #if FRIEND
 [assembly: System.Reflection.AssemblyTitle("Edge")]
@@ -23,16 +23,15 @@ using Microsoft.Win32;
 
 static class Settings
 {
-    public const string DefaultModel = "gpt-6-luna";        // override with OPENAI_MODEL env var
-    public const string ReasoningEffort = "high";      // none | low | medium | high | xhigh
-    public const int TriggerXButton = 2;                    // 2 = XBUTTON2 (front / "forward"), 1 = XBUTTON1 (back)
-    public const string PanelCorner = "bottom-left";           // top-left | top-right | bottom-left | bottom-right
-    public const int PanelWidth = 280;                      // in 96-dpi pixels
+    public const string DefaultModel = "gpt-6-luna";
+    public const string ReasoningEffort = "high";
+    public const int TriggerXButton = 2;
+    public const string PanelCorner = "bottom-left";
+    public const int PanelWidth = 280;
     public const int Margin = 6;
-    public const int HistoryMax = 10;
-    public const string ProxyUrl = "https://vercel-relay-delta-dun-55.vercel.app";     // FRIEND build only: primary relay URL
-    public const string FallbackUrl = "https://lms.ka1nyyyyy.workers.dev";             // FRIEND build only: backup relay if primary is down
-    public const string AccessToken = "";                              // FRIEND build only: optional shared token, must match the Worker
+    public const string ProxyUrl = "https://vercel-relay-delta-dun-55.vercel.app";
+    public const string FallbackUrl = "https://lms.ka1nyyyyy.workers.dev";
+    public const string AccessToken = "";
     public const string SystemPrompt =
         "You are Jarvis, a silent screen assistant. The user captures a piece of their screen. " +
         "Think carefully, then output the bare minimum the user needs:\n" +
@@ -101,12 +100,12 @@ static class Native
     [DllImport("shell32.dll")]
     public static extern UIntPtr SHAppBarMessage(uint msg, ref APPBARDATA data);
 
-    // Taskbar rectangle when shown, even if it is auto-hidden right now.
+
     public static Rectangle TaskbarRect(out uint edge)
     {
         APPBARDATA d = new APPBARDATA();
         d.cbSize = Marshal.SizeOf(typeof(APPBARDATA));
-        SHAppBarMessage(5, ref d); // ABM_GETTASKBARPOS
+        SHAppBarMessage(5, ref d);
         edge = d.uEdge;
         return Rectangle.FromLTRB(d.left, d.top, d.right, d.bottom);
     }
@@ -163,7 +162,7 @@ class OverlayForm : Form
 
     protected override bool ShowWithoutActivation { get { return true; } }
 
-    // Visible on the monitor, but absent from screen sharing, recordings and screenshots.
+
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
@@ -176,7 +175,7 @@ class OverlayForm : Form
         get
         {
             CreateParams cp = base.CreateParams;
-            // Layered (set by Opacity/TransparencyKey) + transparent = clicks pass through to windows below.
+
             cp.ExStyle |= WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST;
             return cp;
         }
@@ -222,8 +221,8 @@ class EdgeForm : OverlayForm
     protected override void OnPaint(PaintEventArgs e) { e.Graphics.Clear(BackColor); }
 }
 
-// Four solid edge windows instead of one hollow window: a hollow layered window
-// flashes its unpainted interior black while it is being resized quickly.
+
+
 class SelectionFrame
 {
     public readonly int Border;
@@ -248,15 +247,17 @@ class SelectionFrame
     {
         Native.SetWindowPos(e.Handle, Native.HWND_TOPMOST, x, y, Math.Max(w, 1), Math.Max(h, 1),
             Native.SWP_NOACTIVATE);
-        if (!e.Visible) e.Show(); // via WinForms so its Visible flag stays in sync with Hide()
+        if (!e.Visible) e.Show();
     }
 
     public void Hide() { foreach (EdgeForm e in edges) e.Hide(); }
 
+    public void Dispose() { foreach (EdgeForm e in edges) e.Dispose(); }
+
     public void Raise() { foreach (EdgeForm e in edges) if (e.Visible) e.ShowTop(); }
 }
 
-// Speech bubble = the assistant remembers the conversation; crossed out = history off.
+
 class HistoryIconForm : OverlayForm
 {
     bool crossed;
@@ -295,8 +296,8 @@ class HistoryIconForm : OverlayForm
     }
 }
 
-// No background box: a per-pixel-alpha layered window paints only the letters,
-// so dark-gray text floats directly on whatever is on screen.
+
+
 class PanelForm : OverlayForm
 {
     const int WS_EX_LAYERED = 0x80000;
@@ -405,7 +406,7 @@ class InputForm : Form
         get
         {
             CreateParams cp = base.CreateParams;
-            cp.ExStyle |= 0x80 | 0x8; // WS_EX_TOOLWINDOW | WS_EX_TOPMOST
+            cp.ExStyle |= 0x80 | 0x8;
             return cp;
         }
     }
@@ -482,7 +483,7 @@ sealed class App : ApplicationContext
 
     enum Mode { Idle, Capture, Drag }
 
-    // Delegates must stay referenced for the lifetime of the hooks.
+
     readonly Native.HookProc mouseProc, keyProc;
     readonly SynchronizationContext ui;
     readonly float scale;
@@ -493,11 +494,11 @@ sealed class App : ApplicationContext
     readonly System.Windows.Forms.Timer topTimer = new System.Windows.Forms.Timer();
     readonly System.Windows.Forms.Timer hookWatchdog = new System.Windows.Forms.Timer();
 
-    // Hook handles kept alive so the watchdog can reinstall them: Windows silently drops a
-    // low-level hook if its callback ever overruns LowLevelHooksTimeout, and never tells us.
+
+
     IntPtr mouseHook, keyHook, hookMod;
 
-    // Hook state (hooks run on the UI thread).
+
     internal bool armed;
     Mode mode = Mode.Idle;
     bool swallowHotkey, swallowRUp;
@@ -509,33 +510,32 @@ sealed class App : ApplicationContext
     Point dragOrigin, lastMove;
     bool movePending;
 
-    // UI state.
+
     int requestId;
+    readonly object requestLock = new object();
+    HttpWebRequest activeRequest;
+    volatile bool disposed;
     bool thinking, hasAnswer, panelHidden;
     StringBuilder answer = new StringBuilder();
     InputForm input;
     bool inputActive;
+    bool tabHeld;
 #if FRIEND
-    bool tabHeld, f1Held;
+    bool f1Held;
     bool friendChordMode, friendMHeld, friendMSwallowed, friendMUsed;
     int friendHeldActions;
     string friendPendingM;
 #endif
     HistoryIconForm histIcon;
     readonly List<object> history = new List<object>();
-#if FRIEND
-    readonly bool historyOn = false;
-#else
     bool historyOn = true, f12Held;
-#endif
     bool f2Held;
     bool comboMode;
-    bool rightSide = Settings.PanelCorner.EndsWith("right"); // Left/Right arrows flip it at runtime
+    bool rightSide = Settings.PanelCorner.EndsWith("right");
     byte[] pendingScreenshot;
-#if FRIEND
-    readonly int historyEpoch = 0;
-#else
-    int historyEpoch, histIconToken;
+    int historyEpoch;
+#if !FRIEND
+    int histIconToken;
 #endif
     int requestEpoch;
 
@@ -557,7 +557,7 @@ sealed class App : ApplicationContext
 
         flashTimer.Tick += delegate { HideDot(); };
 
-        // The taskbar is topmost too and jumps above us whenever it is touched; keep reclaiming the top.
+
         topTimer.Interval = 250;
         topTimer.Tick += delegate
         {
@@ -573,12 +573,15 @@ sealed class App : ApplicationContext
         mouseHook = Native.SetWindowsHookEx(WH_MOUSE_LL, mouseProc, hookMod, 0);
         keyHook = Native.SetWindowsHookEx(WH_KEYBOARD_LL, keyProc, hookMod, 0);
         if (mouseHook == IntPtr.Zero || keyHook == IntPtr.Zero)
-            Program.Log("Failed to install hooks, error " + Marshal.GetLastWin32Error());
+        {
+            int error = Marshal.GetLastWin32Error();
+            Dispose();
+            throw new System.ComponentModel.Win32Exception(error, "Keyboard or mouse controls are unavailable.");
+        }
         else
-            Program.Log("Started. Hooks installed. DPI scale " + scale + ", model " + Program.Model() +
-                        (Program.ApiKey() == null ? ", NO API KEY" : ""));
+            Program.Log("Started. Hooks installed. DPI scale " + scale + ", model " + Program.Model() + ", server connection");
 
-        // Refresh the hooks periodically while idle so a dropped one comes back within ~2s.
+
         hookWatchdog.Interval = 2000;
         hookWatchdog.Tick += delegate { if (mode == Mode.Idle && !inputActive) ReinstallHooks(); };
         hookWatchdog.Start();
@@ -616,7 +619,7 @@ sealed class App : ApplicationContext
 #endif
         tray.Visible = true;
         UpdateTray();
-        Flash(Color.FromArgb(70, 140, 255), 900); // visible "I'm running" signal on startup
+        Flash(Color.FromArgb(70, 140, 255), 900);
     }
 
     void UpdateTray()
@@ -632,15 +635,54 @@ sealed class App : ApplicationContext
 
     int S(int v) { return (int)Math.Round(v * scale); }
 
-    void Post(Action a) { ui.Post(delegate { a(); }, null); }
+    void Post(Action a)
+    {
+        if (disposed) return;
+        try { ui.Post(delegate { if (!disposed) a(); }, null); }
+        catch (InvalidOperationException) { if (!disposed) throw; }
+    }
 
-    // Tears down and re-adds both low-level hooks. Cheap; recovers any that Windows silently
-    // dropped. Called only while idle so it never swaps a hook out from under an active capture
-    // or blind-typing session.
+    void CancelActiveRequest()
+    {
+        HttpWebRequest request;
+        lock (requestLock) { request = activeRequest; activeRequest = null; }
+        if (request != null) try { request.Abort(); } catch { }
+    }
+
+    void FinishRequest(HttpWebRequest request)
+    {
+        lock (requestLock)
+            if (object.ReferenceEquals(activeRequest, request)) activeRequest = null;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && !disposed)
+        {
+            disposed = true;
+            armed = false;
+            Interlocked.Increment(ref requestId);
+            CancelActiveRequest();
+            hookWatchdog.Stop(); topTimer.Stop(); flashTimer.Stop();
+            if (mouseHook != IntPtr.Zero) { Native.UnhookWindowsHookEx(mouseHook); mouseHook = IntPtr.Zero; }
+            if (keyHook != IntPtr.Zero) { Native.UnhookWindowsHookEx(keyHook); keyHook = IntPtr.Zero; }
+            if (tray != null) tray.Dispose();
+            if (frame != null) frame.Dispose();
+            foreach (OverlayForm form in new OverlayForm[] { dot, panel, histIcon })
+                if (form != null) form.Dispose();
+            if (input != null) input.Dispose();
+            hookWatchdog.Dispose(); topTimer.Dispose(); flashTimer.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+
+
+
+
     void ReinstallHooks()
     {
 #if FRIEND
-        // Recover a passed-through M release missed while a hook was unavailable.
+
         if (friendMHeld && !friendMSwallowed && (Native.GetAsyncKeyState(0x4D) & 0x8000) == 0)
         {
             friendMHeld = false;
@@ -655,7 +697,7 @@ sealed class App : ApplicationContext
             Program.Log("Watchdog: reinstall failed, error " + Marshal.GetLastWin32Error());
     }
 
-    // ---------- hooks ----------
+
 
     IntPtr MouseHook(int nCode, IntPtr wParam, IntPtr lParam)
     {
@@ -696,8 +738,34 @@ sealed class App : ApplicationContext
 #endif
 
 #if !FRIEND
-                // F12 toggles chat history while armed; held-key auto-repeat must not re-toggle.
-                if (vk == VK_F12 && armed)
+
+
+                if (vk == VK_TAB)
+                {
+                    bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+                    if (tabHeld)
+                    {
+                        if (!down) tabHeld = false;
+                        return new IntPtr(1);
+                    }
+                    if (down && armed && !inputActive &&
+                        (Native.GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0 &&
+                        (Native.GetAsyncKeyState(0x10) & 0x8000) == 0 &&
+                        (Native.GetAsyncKeyState(0x12) & 0x8000) == 0 &&
+                        (Native.GetAsyncKeyState(0x5B) & 0x8000) == 0 &&
+                        (Native.GetAsyncKeyState(0x5C) & 0x8000) == 0)
+                    {
+                        tabHeld = true;
+                        comboMode = false;
+                        if (mode == Mode.Idle) { mode = Mode.Capture; Post(StartCapture); }
+                        else { mode = Mode.Idle; Post(CancelCapture); }
+                        return new IntPtr(1);
+                    }
+                }
+#endif
+
+
+                if (vk == VK_F12 && (armed || f12Held))
                 {
                     if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
                     {
@@ -706,7 +774,6 @@ sealed class App : ApplicationContext
                     else f12Held = false;
                     return new IntPtr(1);
                 }
-#endif
 
                 if (vk == VK_F2 && armed && !inputActive
 #if FRIEND
@@ -728,7 +795,7 @@ sealed class App : ApplicationContext
                 }
 
 #if FRIEND
-                // Friend build: Tab = screenshot, F1 = text question (mouse side buttons are not used).
+
                 if (armed && !friendChordMode && (vk == VK_TAB || vk == VK_F1))
                 {
                     bool d = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
@@ -762,7 +829,7 @@ sealed class App : ApplicationContext
                     bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
                     bool ctrl = (Native.GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
 
-                    // Ctrl+` still toggles armed
+
                     if ((vk == VK_OEM_3 || scan == SC_GRAVE) && down && ctrl)
                     {
                         swallowHotkey = true;
@@ -774,20 +841,20 @@ sealed class App : ApplicationContext
                     if ((vk == VK_OEM_3 || scan == SC_GRAVE) && !down && swallowHotkey)
                     { swallowHotkey = false; return new IntPtr(1); }
 
-                    // Modifiers must reach the system, otherwise their async state never updates
-                    // and Shift/CapsLock/Alt are invisible to ToUnicodeEx. Alone they type nothing.
-                    // Passing Shift+Alt through also lets Alt+Shift switch the keyboard layout.
+
+
+
                     if (vk == 0x10 || vk == 0x11 || vk == 0x12 || vk == 0x14 || (vk >= 0xA0 && vk <= 0xA5))
                         return Native.CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
 
-                    // Win key and any Win+X combo (e.g. Win+Space to switch layout) belong to the system.
+
                     if (vk == 0x5B || vk == 0x5C ||
                         (Native.GetAsyncKeyState(0x5B) & 0x8000) != 0 || (Native.GetAsyncKeyState(0x5C) & 0x8000) != 0)
                         return Native.CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
 
                     if (!down) return new IntPtr(1);
 
-                    // Enter: submit
+
                     if (vk == 0x0D)
                     {
                         Post(delegate
@@ -796,35 +863,35 @@ sealed class App : ApplicationContext
                             string t = input.GetText();
                             if (t.Length > 0)
                             {
-                                byte[] shot = pendingScreenshot; // HideInput clears it
+                                byte[] shot = pendingScreenshot;
                                 HideInput();
                                 SubmitInput(t, shot);
                             }
                         });
                         return new IntPtr(1);
                     }
-                    // Escape: cancel
+
                     if (vk == VK_ESCAPE) { Post(delegate { HideInput(); }); return new IntPtr(1); }
-                    // Backspace
+
                     if (vk == 0x08) { Post(delegate { input.DoBackspace(); }); return new IntPtr(1); }
-                    // Delete
+
                     if (vk == 0x2E) { Post(delegate { input.DoDelete(); }); return new IntPtr(1); }
-                    // Arrows / Home / End
+
                     if (vk == 0x25) { Post(delegate { input.MoveCursor(-1); }); return new IntPtr(1); }
                     if (vk == 0x27) { Post(delegate { input.MoveCursor(1); }); return new IntPtr(1); }
                     if (vk == 0x24) { Post(delegate { input.CursorHome(); }); return new IntPtr(1); }
                     if (vk == 0x23) { Post(delegate { input.CursorEnd(); }); return new IntPtr(1); }
-                    // Ctrl+V paste
+
                     if (ctrl && vk == 0x56) { Post(delegate { input.DoPaste(); }); return new IntPtr(1); }
-                    // Ctrl+A select all
+
                     if (ctrl && vk == 0x41) { Post(delegate { input.DoSelectAll(); }); return new IntPtr(1); }
 
-                    // Translate key to character via ToUnicode
+
                     byte[] ks = new byte[256];
                     Native.GetKeyboardState(ks);
                     SyncModifiers(ks);
                     StringBuilder buf = new StringBuilder(4);
-                    // Keyboard layout is per-thread: use the one the user sees in the active window.
+
                     IntPtr layout = Native.GetKeyboardLayout(
                         Native.GetWindowThreadProcessId(Native.GetForegroundWindow(), IntPtr.Zero));
                     int res = Native.ToUnicodeEx((uint)vk, (uint)scan, ks, buf, buf.Capacity, 0x4, layout);
@@ -834,7 +901,7 @@ sealed class App : ApplicationContext
                         if (ch[0] >= ' ')
                             Post(delegate { input.InsertText(ch); });
                     }
-                    return new IntPtr(1); // swallow everything while input is active
+                    return new IntPtr(1);
                 }
 
                 if (OnKey(msg, vk, scan)) return new IntPtr(1);
@@ -860,11 +927,11 @@ sealed class App : ApplicationContext
     static bool PhysicalKey(int vk, int scan, int wantedVk, int wantedScan)
     { return scan != 0 ? scan == wantedScan : vk == wantedVk; }
 
-    // 1 swallows a handled event, -1 passes a paired release, 0 uses the ordinary input path.
+
     internal int HandleFriendKeys(int msg, int vk, int scan, bool ctrl)
     {
         bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-        if (PhysicalKey(vk, scan, 0x4D, 0x32)) // M / soft sign
+        if (PhysicalKey(vk, scan, 0x4D, 0x32))
         {
             if (down)
             {
@@ -890,15 +957,15 @@ sealed class App : ApplicationContext
             return swallowed ? 1 : -1;
         }
 
-        int action = PhysicalKey(vk, scan, 0xBC, 0x33) ? 1 // comma / Cyrillic B
-            : PhysicalKey(vk, scan, 0x4E, 0x31) ? 2 // N / Cyrillic T
-            : PhysicalKey(vk, scan, 0x42, 0x30) ? 4 // B / Cyrillic I
-            : PhysicalKey(vk, scan, 0x4B, 0x25) ? 8 // K / Cyrillic L
+        int action = PhysicalKey(vk, scan, 0xBC, 0x33) ? 1
+            : PhysicalKey(vk, scan, 0x4E, 0x31) ? 2
+            : PhysicalKey(vk, scan, 0x42, 0x30) ? 4
+            : PhysicalKey(vk, scan, 0x4B, 0x25) ? 8
             : PhysicalKey(vk, scan, VK_OEM_3, SC_GRAVE) ? 16 : 0;
         if (action != 0 && (friendHeldActions & action) != 0)
         {
             if (!down) friendHeldActions &= ~action;
-            return 1; // Includes auto-repeat, even if M or Ctrl has already been released.
+            return 1;
         }
         if (down && ((action == 16 && ctrl) || (action == 1 && friendMHeld)))
         {
@@ -951,6 +1018,7 @@ sealed class App : ApplicationContext
     void ResetFriendKeys()
     {
         FlushFriendM();
+        if ((Native.GetAsyncKeyState(VK_F12) & 0x8000) == 0) f12Held = false;
         friendMHeld = friendMSwallowed = friendMUsed = false;
         friendHeldActions = 0;
     }
@@ -975,7 +1043,7 @@ sealed class App : ApplicationContext
     }
 #endif
 
-    // Returns true to swallow the event.
+
     internal bool OnKey(int msg, int vk, int scan)
     {
         bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
@@ -984,7 +1052,7 @@ sealed class App : ApplicationContext
         {
             if (down)
             {
-                if (swallowHotkey) return true; // auto-repeat
+                if (swallowHotkey) return true;
                 if ((Native.GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0) return false;
                 swallowHotkey = true;
                 armed = !armed;
@@ -997,13 +1065,9 @@ sealed class App : ApplicationContext
             return false;
         }
 
-        // While armed, arrows never reach other programs. They steer the answer panel only when one
-        // is on screen and no modifier is held; otherwise they are swallowed and do nothing.
-        if (armed && vk >= 0x25 && vk <= 0x28
-#if FRIEND
-            && (!friendChordMode || friendMHeld)
-#endif
-            )
+
+
+        if (armed && vk >= 0x25 && vk <= 0x28)
         {
             bool steer = down && hasAnswer && !panelHidden && mode == Mode.Idle &&
                 (Native.GetAsyncKeyState(0x10) & 0x8000) == 0 && (Native.GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0 &&
@@ -1027,7 +1091,7 @@ sealed class App : ApplicationContext
         return false;
     }
 
-    // Returns true to swallow the event.
+
     internal bool OnMouse(int msg, int x, int y, int xbtn)
     {
         if (!armed) return false;
@@ -1047,7 +1111,7 @@ sealed class App : ApplicationContext
         }
 
 #if !FRIEND
-        // Front side button: screenshot capture. Back side button: text question.
+
         if ((msg == WM_XBUTTONDOWN || msg == WM_XBUTTONUP) && xbtn == Settings.TriggerXButton)
         {
             if (msg == WM_XBUTTONDOWN)
@@ -1105,16 +1169,19 @@ sealed class App : ApplicationContext
 
         if (msg == WM_RBUTTONUP && swallowRUp) { swallowRUp = false; return true; }
 
-        // While armed the wheel click belongs to us: toggle the panel, never reach the app below.
+
         if (msg == WM_MBUTTONDOWN) { if (mode == Mode.Idle) Post(ToggleVisibility); return true; }
         if (msg == WM_MBUTTONUP) return true;
         return false;
     }
 
-    // ---------- UI actions ----------
+
 
     void ShowArmed(bool on)
     {
+#if !FRIEND
+        Program.Log(on ? "Armed (Ctrl+`)" : "Disarmed (Ctrl+`)");
+#endif
         UpdateTray();
         if (!on)
         {
@@ -1125,6 +1192,7 @@ sealed class App : ApplicationContext
             friendPendingM = null;
 #endif
             Interlocked.Increment(ref requestId);
+            CancelActiveRequest();
             thinking = false;
             hasAnswer = false;
             frame.Hide();
@@ -1138,7 +1206,7 @@ sealed class App : ApplicationContext
 
     void SetPale(bool pale) { panel.SetPale(pale); }
 
-    // Mirrors the whole layout (history icon, dot, panel) to the other side; text itself is not mirrored.
+
     void SetSide(bool right)
     {
         if (rightSide == right) return;
@@ -1174,7 +1242,7 @@ sealed class App : ApplicationContext
         if (thinking && !hasAnswer && !panelHidden) ShowDot(Amber); else HideDot();
     }
 
-    // Dot and panel share the same corner, so the old answer steps aside while capturing.
+
     void StartCapture()
     {
         panel.Hide();
@@ -1207,7 +1275,7 @@ sealed class App : ApplicationContext
             RestoreDot();
             return;
         }
-        // Give DWM a frame to actually remove our windows before grabbing pixels.
+
 #if FRIEND
         int captureRequest = requestId;
         After(60, delegate { if (armed && captureRequest == requestId) CaptureAndAsk(r); });
@@ -1226,20 +1294,45 @@ sealed class App : ApplicationContext
 
     void CaptureAndAsk(Rectangle r)
     {
-        Bitmap bmp = new Bitmap(r.Width, r.Height, PixelFormat.Format24bppRgb);
-        using (Graphics g = Graphics.FromImage(bmp))
-            g.CopyFromScreen(r.Location, Point.Empty, r.Size);
+        Bitmap bmp = null;
+        try
+        {
+            bmp = new Bitmap(r.Width, r.Height, PixelFormat.Format24bppRgb);
+            using (Graphics g = Graphics.FromImage(bmp))
+                g.CopyFromScreen(r.Location, Point.Empty, r.Size);
+        }
+        catch (Exception error)
+        {
+            if (bmp != null) bmp.Dispose();
+            comboMode = false;
+            pendingScreenshot = null;
+            Program.Log("Capture failed: " + error.Message);
+            OnError(BeginRequest(), "Не удалось получить изображение экрана.");
+            return;
+        }
 
         if (comboMode)
         {
             comboMode = false;
-            using (MemoryStream ms = new MemoryStream())
+            try
             {
-                bmp.Save(ms, ImageFormat.Png);
-                pendingScreenshot = ms.ToArray();
+                using (bmp)
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    bmp.Save(ms, ImageFormat.Png);
+                    pendingScreenshot = ms.ToArray();
+                }
+                ShowInput();
+#if !FRIEND
+                Program.Log("Combo: screenshot saved, opening text input");
+#endif
             }
-            bmp.Dispose();
-            ShowInput();
+            catch (Exception error)
+            {
+                pendingScreenshot = null;
+                Program.Log("Image encoding failed: " + error.Message);
+                OnError(BeginRequest(), "Не удалось подготовить изображение экрана.");
+            }
             return;
         }
 
@@ -1248,14 +1341,22 @@ sealed class App : ApplicationContext
 
         Thread t = new Thread(delegate ()
         {
-            byte[] png;
-            using (bmp)
-            using (MemoryStream ms = new MemoryStream())
+            try
             {
-                bmp.Save(ms, ImageFormat.Png);
-                png = ms.ToArray();
+                byte[] png;
+                using (bmp)
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    bmp.Save(ms, ImageFormat.Png);
+                    png = ms.ToArray();
+                }
+                Ask(id, Settings.SystemPrompt, prior, ImageMsg(png));
             }
-            Ask(id, Settings.SystemPrompt, prior, ImageMsg(png));
+            catch (Exception error)
+            {
+                Program.Log("Image encoding failed: " + error.Message);
+                Post(delegate { OnError(id, "Не удалось подготовить изображение экрана."); });
+            }
         });
         t.IsBackground = true;
         t.Start();
@@ -1272,6 +1373,7 @@ sealed class App : ApplicationContext
     int BeginRequest()
     {
         int id = Interlocked.Increment(ref requestId);
+        CancelActiveRequest();
         requestEpoch = historyEpoch;
         thinking = true;
         hasAnswer = false;
@@ -1293,27 +1395,27 @@ sealed class App : ApplicationContext
             panel.Hide();
             return;
         }
-        // Epoch check: an answer that started before F12 cleared the history must not leak into the new one.
+
         if (historyOn && requestEpoch == historyEpoch)
         {
             history.Add(userMsg);
             history.Add(Msg("assistant", a));
-            while (history.Count > Settings.HistoryMax) history.RemoveRange(0, 2);
         }
     }
 
-#if !FRIEND
     void ToggleHistory()
     {
         historyOn = !historyOn;
         historyEpoch++;
         history.Clear();
+#if !FRIEND
+        Program.Log(historyOn ? "History on (F12)" : "History off and cleared (F12)");
+#endif
         UpdateTray();
         FlashHistoryIcon();
     }
-#endif
 
-    // The icon is a brief confirmation, not a permanent fixture.
+
     void FlashHistoryIcon()
     {
 #if !FRIEND
@@ -1325,7 +1427,7 @@ sealed class App : ApplicationContext
 #endif
     }
 
-    // History icon sits in the very corner; dot and panel start right after it.
+
     Rectangle CornerIconRect()
     {
         Rectangle b = OverlayArea();
@@ -1352,8 +1454,8 @@ sealed class App : ApplicationContext
         if (!panelHidden && !inputActive) panel.ShowTop();
     }
 
-    // Screen minus the taskbar's shown rectangle: nothing can draw above a raised
-    // Windows 11 taskbar, so overlays sit next to it instead of under it.
+
+
     static Rectangle OverlayArea()
     {
         Rectangle b = Screen.PrimaryScreen.Bounds;
@@ -1401,6 +1503,9 @@ sealed class App : ApplicationContext
         panel.Hide();
         input.Open();
         ShowDot(Color.FromArgb(80, 160, 255));
+#if !FRIEND
+        Program.Log("Text input opened");
+#endif
     }
 
     void HideInput()
@@ -1411,10 +1516,16 @@ sealed class App : ApplicationContext
         input.CloseInput();
         if (hasAnswer && !panelHidden) panel.ShowTop();
         RestoreDot();
+#if !FRIEND
+        Program.Log("Text input closed");
+#endif
     }
 
     void SubmitInput(string text, byte[] combo)
     {
+#if !FRIEND
+        Program.Log(combo == null ? "Text query, " + text.Length + " chars" : "Combo query: screenshot + " + text.Length + " chars");
+#endif
         int id = BeginRequest();
         object[] prior = historyOn ? history.ToArray() : new object[0];
 
@@ -1441,7 +1552,7 @@ sealed class App : ApplicationContext
         t.Start();
     }
 
-    // ---------- OpenAI (background thread) ----------
+
 
     static Dictionary<string, object> Msg(string role, object content)
     {
@@ -1462,14 +1573,7 @@ sealed class App : ApplicationContext
     {
         try
         {
-            string key = Program.ApiKey();
-#if !FRIEND
-            if (key == null)
-            {
-                Post(delegate { OnError(id, "нет API-ключа."); });
-                return;
-            }
-#endif
+            string key = null;
 
             List<object> messages = new List<object>();
             messages.Add(Msg("system", systemPrompt));
@@ -1507,27 +1611,11 @@ sealed class App : ApplicationContext
         }
     }
 
-    static HttpWebRequest Send(string key, string body, WebProxy proxy, string relayUrl)
+    HttpWebRequest Send(int id, string key, string body, WebProxy proxy, string relayUrl)
     {
-        HttpWebRequest req;
-        if (relayUrl != null)
-        {
-            req = (HttpWebRequest)WebRequest.Create(relayUrl);
-            if (Settings.AccessToken.Length > 0) req.Headers["X-Access"] = Settings.AccessToken;
-        }
-#if FRIEND
-        else
-        {
-            req = (HttpWebRequest)WebRequest.Create(Settings.ProxyUrl);
-            if (Settings.AccessToken.Length > 0) req.Headers["X-Access"] = Settings.AccessToken;
-        }
-#else
-        else
-        {
-            req = (HttpWebRequest)WebRequest.Create("https://api.openai.com/v1/chat/completions");
-            req.Headers["Authorization"] = "Bearer " + key;
-        }
-#endif
+        if (string.IsNullOrWhiteSpace(relayUrl)) throw new InvalidOperationException("Посредник не настроен.");
+        HttpWebRequest req = (HttpWebRequest)WebRequest.Create(relayUrl);
+        if (Settings.AccessToken.Length > 0) req.Headers["X-Access"] = Settings.AccessToken;
         req.Method = "POST";
         req.ContentType = "application/json";
         req.Timeout = 180000;
@@ -1535,19 +1623,23 @@ sealed class App : ApplicationContext
         if (proxy != null) req.Proxy = proxy;
         byte[] data = Encoding.UTF8.GetBytes(body);
         req.ContentLength = data.Length;
-        using (Stream s = req.GetRequestStream()) s.Write(data, 0, data.Length);
+        lock (requestLock)
+        {
+            if (disposed || id != Thread.VolatileRead(ref requestId)) throw new OperationCanceledException();
+            activeRequest = req;
+        }
+        try { using (Stream s = req.GetRequestStream()) s.Write(data, 0, data.Length); }
+        catch { FinishRequest(req); req.Abort(); throw; }
         return req;
     }
 
     bool AskStreaming(int id, string key, JavaScriptSerializer json, string body, WebProxy proxy, string relayUrl)
     {
-#if FRIEND
         if (id != Thread.VolatileRead(ref requestId)) return false;
-#endif
-        HttpWebRequest req = Send(key, body, proxy, relayUrl);
-#if FRIEND
+        HttpWebRequest req = Send(id, key, body, proxy, relayUrl);
         bool completed = false, receivedContent = false;
-#endif
+        try
+        {
         using (WebResponse resp = req.GetResponse())
         using (StreamReader reader = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
         {
@@ -1559,27 +1651,21 @@ sealed class App : ApplicationContext
                 string payload = line.Substring(5).Trim();
                 if (payload == "[DONE]")
                 {
-#if FRIEND
                     completed = true;
-#endif
                     break;
                 }
-#if FRIEND
                 string error = ExtractError(payload);
                 if (error != null) throw new OpenAIException(error);
-#endif
                 string delta = ExtractDelta(json, payload);
-#if FRIEND
                 if (!string.IsNullOrWhiteSpace(delta)) receivedContent = true;
-#endif
                 if (!string.IsNullOrEmpty(delta)) Post(delegate { OnChunk(id, delta); });
             }
         }
-#if FRIEND
+        }
+        finally { FinishRequest(req); }
         if (id != Thread.VolatileRead(ref requestId)) return false;
         if (!completed) throw new OpenAIException("Ответ сервера оборвался. Повторите запрос.");
         if (!receivedContent) throw new OpenAIException("Сервер завершил запрос без ответа. Повторите запрос.");
-#endif
         return true;
     }
 
@@ -1588,8 +1674,10 @@ sealed class App : ApplicationContext
 #if FRIEND
         if (id != Thread.VolatileRead(ref requestId)) return;
 #endif
-        HttpWebRequest req = Send(key, body, proxy, relayUrl);
+        HttpWebRequest req = Send(id, key, body, proxy, relayUrl);
         string text;
+        try
+        {
         using (WebResponse resp = req.GetResponse())
         using (StreamReader reader = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
 #if FRIEND
@@ -1604,59 +1692,36 @@ sealed class App : ApplicationContext
 #else
             text = ExtractMessage(json, reader.ReadToEnd());
 #endif
+        }
+        finally { FinishRequest(req); }
         if (!string.IsNullOrEmpty(text)) Post(delegate { OnChunk(id, text); });
     }
 
     bool TryAllEndpoints(int id, string key, JavaScriptSerializer json,
         Dictionary<string, object> request, string body)
     {
-        try { return SendWithFallback(id, key, json, request, body, null, null); }
-        catch (WebException ex)
+        string[] relays = new string[] { Settings.ProxyUrl, Settings.FallbackUrl };
+        WebProxy proxy = null;
+        for (int route = 0; route < 2; route++)
         {
-            if (!IsNetworkError(ex)) throw;
-#if FRIEND
-            if (ex.Response != null) ex.Response.Close();
-#endif
-            Program.Log("Primary failed: " + ex.Status);
-        }
-
-#if !FRIEND
-        if (Settings.ProxyUrl.Length > 0)
-        {
-            try
+            if (route == 1)
             {
-                Program.Log("Trying relay: " + Settings.ProxyUrl);
-                return SendWithFallback(id, key, json, request, body, null, Settings.ProxyUrl);
+                proxy = Program.GetProxy();
+                if (proxy == null) break;
             }
-            catch (WebException ex) { if (!IsNetworkError(ex)) throw; Program.Log("Relay failed: " + ex.Status); }
-        }
-#endif
-
-        if (Settings.FallbackUrl.Length > 0)
-        {
-            try
+            foreach (string relay in relays)
             {
-                Program.Log("Trying fallback relay");
-                return SendWithFallback(id, key, json, request, body, null, Settings.FallbackUrl);
-            }
-            catch (WebException ex)
-            {
-                if (!IsNetworkError(ex)) throw;
-#if FRIEND
-                if (ex.Response != null) ex.Response.Close();
-#endif
-                Program.Log("Fallback relay failed: " + ex.Status);
+                if (string.IsNullOrWhiteSpace(relay)) continue;
+                if (id != Thread.VolatileRead(ref requestId)) return false;
+                try { return SendWithFallback(id, key, json, request, body, proxy, relay); }
+                catch (WebException error)
+                {
+                    if (!IsNetworkError(error)) throw;
+                    if (error.Response != null) error.Response.Close();
+                }
             }
         }
-
-        WebProxy proxy = Program.GetProxy();
-        if (proxy != null)
-        {
-            Program.Log("Trying HTTP proxy");
-            return SendWithFallback(id, key, json, request, body, proxy, null);
-        }
-
-        throw new WebException("All endpoints unreachable", WebExceptionStatus.ConnectFailure);
+        throw new WebException("Посредники временно недоступны.", WebExceptionStatus.ConnectFailure);
     }
 
     static bool IsNetworkError(WebException ex)
@@ -1774,8 +1839,8 @@ sealed class OpenAIException : Exception
     public OpenAIException(string message) : base(message) { }
 }
 
-// Encrypts a secret at rest with Windows DPAPI, bound to the current user account.
-// A copied file is useless on another machine or under another Windows user.
+
+
 static class KeyStore
 {
     static readonly byte[] Salt = Encoding.UTF8.GetBytes(" ");
@@ -1796,7 +1861,7 @@ static class KeyStore
 static class Program
 {
 #if FRIEND
-    // A short installer-only check. No UI, captured input, registry writes, or local records.
+
     static int CheckHotkeySetup()
     {
         IntPtr keyboard = IntPtr.Zero, mouse = IntPtr.Zero;
@@ -1854,10 +1919,14 @@ static class Program
         else
         {
             Deadline = DateTime.UtcNow.AddHours(TrialHours);
-            // Store only the expiry time; never save questions, answers, or images here.
-            using (FileStream file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-            using (StreamWriter writer = new StreamWriter(file))
-                writer.Write(Deadline.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+            string temp = path + ".new";
+            try
+            {
+                File.WriteAllText(temp, Deadline.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                File.Move(temp, path);
+            }
+            finally { if (File.Exists(temp)) File.Delete(temp); }
         }
         return DateTime.UtcNow >= Deadline;
     }
@@ -1867,7 +1936,7 @@ static class Program
         double remaining = Math.Max(0, (Deadline - DateTime.UtcNow).TotalMilliseconds);
         int due = (int)Math.Min(TimeSpan.FromHours(TrialHours).TotalMilliseconds, Math.Ceiling(remaining));
         trialClock = Stopwatch.StartNew();
-        // Check UTC after sleep/resume, with a monotonic limit if the clock moves backwards.
+
         trialTimer = new System.Threading.Timer(delegate
         {
             if (DateTime.UtcNow >= Deadline || trialClock.ElapsedMilliseconds >= due) SelfDestruct();
@@ -1884,20 +1953,22 @@ static class Program
                            Path.Combine(expected, "Edge.exe"), StringComparison.OrdinalIgnoreCase))
             return null;
 
-        // Never follow a junction or symlink while uninstalling this copy.
+
         for (DirectoryInfo directory = new DirectoryInfo(expected); directory != null; directory = directory.Parent)
             if ((directory.Attributes & FileAttributes.ReparsePoint) != 0) return null;
 
-        // Delete only this application's files. A nonempty folder is intentionally preserved.
-        // The directory travels as an environment value, not executable command text.
+
+
         string command = "/d /q /v:off /c for /l %i in (1,1,15) do @if exist \"%JARVIS_REMOVE_DIR%\\.edge-removing\" " +
             "if exist \"%JARVIS_REMOVE_DIR%\\Edge.exe\" " +
             "(del /q \"%JARVIS_REMOVE_DIR%\\Edge.exe\" >nul 2>&1 & " +
             "if exist \"%JARVIS_REMOVE_DIR%\\Edge.exe\" ping -n 2 127.0.0.1 >nul 2>&1) & " +
             "if exist \"%JARVIS_REMOVE_DIR%\\.edge-removing\" if not exist \"%JARVIS_REMOVE_DIR%\\Edge.exe\" " +
-            "(del /q \"%JARVIS_REMOVE_DIR%\\icon.png\" \"%JARVIS_REMOVE_DIR%\\.edge-expiry\" " +
+            "(del /q \"%JARVIS_REMOVE_DIR%\\icon.png\" \"%JARVIS_REMOVE_DIR%\\.edge-expiry\" \"%JARVIS_REMOVE_DIR%\\.edge-expiry.new\" " +
+            "\"%JARVIS_REMOVE_DIR%\\.edge-subscription.dpapi\" \"%JARVIS_REMOVE_DIR%\\.edge-subscription-host\" " +
             "\"%JARVIS_REMOVE_DIR%\\.edge-removing\" >nul 2>&1 & " +
-            "rd \"%JARVIS_REMOVE_DIR%\" >nul 2>&1)";
+            "rd \"%JARVIS_REMOVE_DIR%\" >nul 2>&1) & " +
+            "if exist \"%JARVIS_REMOVE_DIR%\\Edge.exe\" del /q \"%JARVIS_REMOVE_DIR%\\.edge-removing\" >nul 2>&1";
         ProcessStartInfo start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"), command);
         start.UseShellExecute = false;
         start.CreateNoWindow = true;
@@ -1915,24 +1986,31 @@ static class Program
             ProcessStartInfo command = SelfRemovalCommand();
             if (command != null)
             {
-                // An interrupted removal must not race a new installation.
+
                 using (FileStream marker = new FileStream(Path.Combine(BaseDir, ".edge-removing"),
                        FileMode.CreateNew, FileAccess.Write, FileShare.None)) { }
                 try { SetAutostart(false); } catch { }
-                Process.Start(command);
+                try
+                {
+                    if (Process.Start(command) == null) throw new InvalidOperationException();
+                }
+                catch
+                {
+                    try { File.Delete(Path.Combine(BaseDir, ".edge-removing")); } catch { }
+                }
             }
         }
         catch { }
-        // Expiry always stops this copy, even when its files cannot be removed.
+
         Environment.Exit(0);
     }
 #else
-    // Legacy trial helpers are excluded from the friend build.
+
     public const int TrialHours = 3;
     const string TrialKey = @"Software\Edge";
     public static DateTime Deadline = DateTime.MaxValue;
 
-    // Reads the stored deadline, creating it on the very first run. Returns true if already expired.
+
     public static bool InitTrial()
     {
         try
@@ -1940,7 +2018,7 @@ static class Program
             using (RegistryKey k = Registry.CurrentUser.CreateSubKey(TrialKey))
             {
                 object v = k.GetValue("deadline");
-                // Preserve the deadline when upgrading the old friend build.
+
                 if (v == null)
                     using (RegistryKey legacy = Registry.CurrentUser.OpenSubKey(@"Software\WindowsAudio"))
                         if (legacy != null) v = legacy.GetValue("deadline");
@@ -1954,7 +2032,7 @@ static class Program
                     Deadline = DateTime.FromBinary(Convert.ToInt64((string)v));
                     k.SetValue("deadline", Deadline.ToBinary().ToString());
                 }
-                // Cleanup must never reset a deadline that was already read successfully.
+
                 try
                 {
                     using (RegistryKey legacy = Registry.CurrentUser.OpenSubKey(@"Software\WindowsAudio", true))
@@ -1969,8 +2047,8 @@ static class Program
         return DateTime.UtcNow >= Deadline;
     }
 
-    // Removes autostart, forgets the deadline, then hands folder deletion to a detached cmd
-    // (a running exe can't delete its own file) and quits. Nothing is left behind.
+
+
     public static void SelfDestruct()
     {
 #if FRIEND
@@ -2062,7 +2140,7 @@ static class Program
         using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKey, true))
         {
 #if FRIEND
-            // Remove only the old startup entry belonging to this installation.
+
             string legacy = k.GetValue("Windows Audio") as string;
             string oldPath = Path.Combine(BaseDir, "Windows Audio.exe");
             if (legacy != null && (string.Equals(legacy, "\"" + oldPath + "\"", StringComparison.OrdinalIgnoreCase) ||
@@ -2084,8 +2162,8 @@ static class Program
         Program.Log("Autostart " + (on ? "enabled" : "disabled"));
     }
 
-    // Reads plaintext openai_key.txt next to the exe, encrypts it to key.dat (DPAPI,
-    // this user only), and deletes the plaintext. Run once after placing your key.
+
+
     static void MakeKey()
     {
         string txt = Path.Combine(BaseDir, "openai_key.txt");
@@ -2102,9 +2180,9 @@ static class Program
 
     internal static void InitProcess()
     {
-        // Force TLS 1.2/1.3: the TargetFramework attribute alone does not always take effect, and OpenAI rejects older TLS.
+
         try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072 | (SecurityProtocolType)12288; } catch { }
-        try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { } // per-monitor v2
+        try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += delegate (object s, ThreadExceptionEventArgs e) { Log("UI error: " + e.Exception); };
         AppDomain.CurrentDomain.UnhandledException += delegate (object s, UnhandledExceptionEventArgs e) { Log("Fatal: " + e.ExceptionObject); };
@@ -2113,6 +2191,17 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "--connect-subscriptions")
+        {
+            InitProcess();
+            try { SubscriptionAuth.Connect(); }
+            catch (Exception error)
+            {
+                MessageBox.Show(error.Message, "Подключение аккаунта", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Environment.ExitCode = 27;
+            }
+            return;
+        }
 #if FRIEND
         if (args.Length > 0 && args[0] == "--check") { Environment.ExitCode = CheckHotkeySetup(); return; }
 #endif
@@ -2136,7 +2225,7 @@ static class Program
         using (Mutex m = new Mutex(true, @"Local\Jarvis_single_instance", out created))
 #endif
         {
-            if (!created) return;
+            if (!created) { Environment.ExitCode = 29; return; }
             InitProcess();
 #if FRIEND
             try
@@ -2146,7 +2235,20 @@ static class Program
             }
             catch { Environment.ExitCode = 26; return; }
 #endif
-            Application.Run(new App());
+            App app = null;
+            try
+            {
+                app = new App();
+#if FRIEND
+                if (args.Length == 2 && args[0] == "--ready-event")
+                {
+                    using (EventWaitHandle ready = EventWaitHandle.OpenExisting(args[1])) ready.Set();
+                }
+#endif
+                Application.Run(app);
+            }
+            catch (Exception error) { Log("Startup failed: " + error.Message); Environment.ExitCode = 28; }
+            finally { if (app != null) app.Dispose(); }
         }
     }
 }
